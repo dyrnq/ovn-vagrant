@@ -202,7 +202,7 @@ def ensure_bridge(bridge_name, gw_cidr):
     rc, out, _ = run(["ip", "-4", "-o", "addr", "show", "dev", bridge_name], check=False)
     gw_ip = gw_cidr.split("/")[0]
     if gw_ip not in out:
-        run(["ip", "addr", "add", gw_cidr, "dev", bridge_name], check=False)
+        run(["ip", "addr", "add", gw_cidr, "dev", bridge_name])  # critical
 
     # Disable ICMP redirect on bridge
     run(["sysctl", "-w", f"net.ipv4.conf.{bridge_name}.send_redirects=0"], check=False)
@@ -219,9 +219,9 @@ def ensure_geneve_bridge(dev, remote_ip, bridge_name):
     rc, _, _ = run(["ip", "link", "show", dev], check=False)
     if rc != 0:
         run(["ip", "link", "add", dev, "type", "geneve",
-             "remote", remote_ip, "id", "1"])
-        run(["ip", "link", "set", dev, "master", bridge_name])
-        run(["ip", "link", "set", dev, "up"])
+             "remote", remote_ip, "id", "1"])  # critical
+        run(["ip", "link", "set", "dev", "master", bridge_name])  # critical
+        run(["ip", "link", "set", dev, "up"])  # critical
         log.info("created geneve %s → %s (bridge %s)", dev, remote_ip, bridge_name)
     return True
 

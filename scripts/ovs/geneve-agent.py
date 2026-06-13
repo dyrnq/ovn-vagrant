@@ -230,7 +230,7 @@ def ensure_geneve_tunnel(port_name, remote_ip):
         "type=geneve",
         f"options:remote_ip={remote_ip}",
         "options:key=1",
-    ], check=False)
+    ])  # critical
     if rc != 0:
         log.warning("create OVS geneve %s → %s failed: %s", port_name, remote_ip, err)
         return False
@@ -290,7 +290,7 @@ def ensure_gateway(c, hostname, gw_ip):
         if rc2 == 0 and gw_ip in out:
             return True
 
-    run(["ip", "link", "del", gw_dev], check=False)
+    run(["ip", "link", "del", gw_dev], check=False)  # cleanup, ok to fail
 
     # Generate unique MAC before creating veth (avoids FDB collision)
     mac = gen_mac()
@@ -298,12 +298,12 @@ def ensure_gateway(c, hostname, gw_ip):
          "type", "veth", "peer", "name", gw_int])
 
     # Attach OVS side to br-int
-    run(["ovs-vsctl", "--if-exists", "del-port", "br-int", gw_int], check=False)
+    run(["ovs-vsctl", "--if-exists", "del-port", "br-int", gw_int], check=False)  # cleanup
     run(["ovs-vsctl", "add-port", "br-int", gw_int])
     run(["ip", "link", "set", gw_int, "up"])
 
     # Assign gateway IP
-    run(["ip", "addr", "flush", "dev", gw_dev], check=False)
+    run(["ip", "addr", "flush", "dev", gw_dev], check=False)  # cleanup
     run(["ip", "addr", "add", gw_cidr, "dev", gw_dev])
     run(["ip", "link", "set", gw_dev, "up"])
 
