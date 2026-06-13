@@ -300,7 +300,8 @@ def ensure_gateway(c, hostname, gw_ip, saved_mac=""):
     if rc == 0:
         rc2, out, _ = run(["ip", "-4", "-o", "addr", "show", "dev", gw_dev], check=False)
         if rc2 == 0 and gw_ip in out:
-            return True
+            _, existing_mac, _ = run(["cat", f"/sys/class/net/{gw_dev}/address"], check=False)
+            return existing_mac if re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', existing_mac) else ""
 
     run(["ip", "link", "del", gw_dev], check=False)  # cleanup, ok to fail
 
@@ -329,7 +330,7 @@ def ensure_gateway(c, hostname, gw_ip, saved_mac=""):
     run(["ip", "route", "replace", overlay_route, "dev", gw_dev], check=False)
 
     log.info("gateway %s = %s  MAC=%s", gw_dev, gw_cidr, mac)
-    return True
+    return mac
 
 
 
@@ -438,7 +439,14 @@ def main():
              hostname, local_ip, gw_ip, c["PREFIX_LEN"])
 
     # 4. Ensure gateway
-    ensure_gateway(c, hostname, gw_ip, gw_mac)
+    actual_mac = ensure_gateway(c, hostname, gw_ip, gw_mac)
+
+    # Persist actual MAC to allocation
+    if actual_mac and (not gw_mac or gw_mac != actual_mac):
+        etcd.put(alloc_key, json.dumps({
+            "host_id": host_id, "gw_ip": gw_ip, "mgmt_ip": local_ip, "gw_mac": actual_mac,
+        }))
+        log.info("persisted gw_mac=%s to allocation", actual_mac)
 
     # 5. Clean stale geneve tunnels from previous run
     _clean_stale_tunnels(c, etcd)
@@ -477,7 +485,9 @@ def main():
         while not stop_event.is_set():
             time.sleep(c["LEASE_TTL"] // 2)
             if not stop_event.is_set():
-                etcd.keepalive()
+                ok = etcd.keepalive()
+                if not ok:
+                    log.warning("lease keepalive failed — peers may see us as offline")
     t = threading.Thread(target=keepalive_loop, daemon=True)
     t.start()
 
@@ -511,6 +521,25 @@ def main():
                 lease_id = etcd.grant_lease(c["LEASE_TTL"])
                 etcd.put(etcd_key, json.dumps({"mgmt_ip": local_ip, "gw_ip": gw_ip}), lease_id=lease_id)
                 log.info("re-registered: %s", etcd_key)
+                # Reload peers to catch missed events
+                peers_raw = etcd.get_prefix(c["ETCD_PREFIX"])
+                current_peers = set()
+                for pn, pv in peers_raw.items():
+                    if pn == hostname:
+                        continue
+                    try:
+                        pi = json.loads(pv)
+                        current_peers.add(pn)
+                        if pn not in peer_cache:
+                            peer_cache[pn] = pi
+                            add_peer(pn, pi, c, hostname)
+                            log.info("discovered peer on reconnect: %s", pn)
+                    except json.JSONDecodeError:
+                        pass
+                for pn in list(peer_cache.keys()):
+                    if pn not in current_peers:
+                        remove_peer(pn, peer_cache.pop(pn, {}), c)
+                        log.info("removed stale peer on reconnect: %s", pn)
             except Exception as e2:
                 log.error("re-register failed: %s", e2)
 

@@ -204,11 +204,18 @@ class EtcdClient:
 def ensure_bridge(bridge_name, gw_cidr, saved_mac=""):
     """Create Linux bridge with gateway IP."""
     rc, _, _ = run(["ip", "link", "show", bridge_name], check=False)
+    mac = saved_mac
+    rc, _, _ = run(["ip", "link", "show", bridge_name], check=False)
+    mac = saved_mac
     if rc != 0:
         mac = saved_mac if saved_mac else gen_mac()
         run(["ip", "link", "add", bridge_name, "address", mac, "type", "bridge"], check="die")
         run(["ip", "link", "set", bridge_name, "up"], check="die")
         log.info("created bridge %s (MAC=%s)", bridge_name, mac)
+    else:
+        _, mac_out, _ = run(["cat", f"/sys/class/net/{bridge_name}/address"], check=False)
+        if re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac_out):
+            mac = mac_out
 
     # Assign gateway IP if not present
     rc, out, _ = run(["ip", "-4", "-o", "addr", "show", "dev", bridge_name], check=False)
@@ -223,6 +230,8 @@ def ensure_bridge(bridge_name, gw_cidr, saved_mac=""):
     run(["sysctl", "-w", f"net.ipv4.conf.{bridge_name}.send_redirects=0"], check=False)
 
     log.info("bridge %s = %s", bridge_name, gw_cidr)
+    return mac
+    return mac
 
 
 def geneve_dev_name(peer_name):
@@ -383,7 +392,14 @@ def main():
     log.info("host: %s (%s) → gateway: %s", hostname, local_ip, gw_cidr)
 
     # 4. Create bridge + gateway
-    ensure_bridge(c["BRIDGE_NAME"], gw_cidr, gw_mac)
+    actual_mac = ensure_bridge(c["BRIDGE_NAME"], gw_cidr, gw_mac)
+
+    # Persist actual MAC to allocation
+    if actual_mac and (not gw_mac or gw_mac != actual_mac):
+        etcd.put(alloc_key, json.dumps({
+            "host_id": host_id, "gw_ip": gw_ip, "mgmt_ip": local_ip, "gw_mac": actual_mac,
+        }))
+        log.info("persisted gw_mac=%s to allocation", actual_mac)
 
     # 5. Register with lease
     lease_id = etcd.grant_lease(c["LEASE_TTL"])
@@ -452,11 +468,31 @@ def main():
                 break
             log.warning("watch disconnected: %s — reconnecting in %ds", e, c["CHECK_INTERVAL"])
             time.sleep(c["CHECK_INTERVAL"])
-            # Re-register in case lease expired
+            # Re-register + reload peers
             try:
                 lease_id = etcd.grant_lease(c["LEASE_TTL"])
                 etcd.put(etcd_key, json.dumps({"mgmt_ip": local_ip, "gw_ip": gw_ip}), lease_id=lease_id)
                 log.info("re-registered: %s", etcd_key)
+                # Reload peers to catch any missed events
+                peers_raw = etcd.get_prefix(c["ETCD_PREFIX"])
+                current_peers = set()
+                for pn, pv in peers_raw.items():
+                    if pn == hostname:
+                        continue
+                    try:
+                        pi = json.loads(pv)
+                        current_peers.add(pn)
+                        if pn not in peer_cache:
+                            peer_cache[pn] = pi
+                            add_peer(pn, pi, c)
+                            log.info("discovered peer on reconnect: %s", pn)
+                    except json.JSONDecodeError:
+                        pass
+                # Clean stale tunnels (peers that disappeared during disconnect)
+                for pn in list(peer_cache.keys()):
+                    if pn not in current_peers:
+                        remove_peer(pn, peer_cache.pop(pn, {}), c)
+                        log.info("removed stale peer on reconnect: %s", pn)
             except Exception as e2:
                 log.error("re-register failed: %s", e2)
 
