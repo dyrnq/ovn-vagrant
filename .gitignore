@@ -1,0 +1,5 @@
+.mac-ovn*
+.vagrant/
+provision.log
+scripts/__pycache__
+OVS-VETH-BUG-REPORT.md
