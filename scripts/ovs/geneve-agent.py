@@ -51,11 +51,21 @@ log = logging.getLogger("geneve-agent")
 # ── Helpers ─────────────────────────────────────────────────
 
 def run(cmd, check=True):
+    """Run a command.
+    
+    check=True:  log warning on failure (default)
+    check="die": log error and exit on failure
+    check=False: silent
+    """
     log.debug("exec: %s", " ".join(cmd))
     r = subprocess.run(cmd, capture_output=True, text=True)
     if check and r.returncode != 0:
-        log.warning("cmd failed [%d]: %s  stderr=%s",
-                     r.returncode, " ".join(cmd), r.stderr.strip())
+        msg = "cmd failed [%d]: %s  stderr=%s" % (r.returncode, " ".join(cmd), r.stderr.strip())
+        if check == "die":
+            log.error(msg)
+            sys.exit(1)
+        else:
+            log.warning(msg)
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
@@ -295,17 +305,17 @@ def ensure_gateway(c, hostname, gw_ip):
     # Generate unique MAC before creating veth (avoids FDB collision)
     mac = gen_mac()
     run(["ip", "link", "add", gw_dev, "address", mac,
-         "type", "veth", "peer", "name", gw_int])
+         "type", "veth", "peer", "name", gw_int], check="die")
 
     # Attach OVS side to br-int
     run(["ovs-vsctl", "--if-exists", "del-port", "br-int", gw_int], check=False)  # cleanup
-    run(["ovs-vsctl", "add-port", "br-int", gw_int])
-    run(["ip", "link", "set", gw_int, "up"])
+    run(["ovs-vsctl", "add-port", "br-int", gw_int], check="die")
+    run(["ip", "link", "set", gw_int, "up"], check="die")
 
     # Assign gateway IP
     run(["ip", "addr", "flush", "dev", gw_dev], check=False)  # cleanup
-    run(["ip", "addr", "add", gw_cidr, "dev", gw_dev])
-    run(["ip", "link", "set", gw_dev, "up"])
+    run(["ip", "addr", "add", gw_cidr, "dev", gw_dev], check="die")
+    run(["ip", "link", "set", gw_dev, "up"], check="die")
 
     # Disable ICMP redirect (gateway must forward, not redirect)
     run(["sysctl", "-w", f"net.ipv4.conf.{gw_dev}.send_redirects=0"], check=False)
