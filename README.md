@@ -77,7 +77,12 @@ vagrant ssh ovn12 -- sudo bash /vagrant/scripts/kernel/poc.sh verify 172.16.13.1
 
 ## geneve-agent — Auto-discovery Daemon
 
-Mirrors flanneld: detects host IP → derives subnet → creates Geneve tunnel per peer.
+Both `ovs/geneve-agent.py` and `kernel/geneve-agent.py` share the same etcd-based
+discovery logic. The difference is the forwarding plane:
+- **kernel/**: Linux bridge (`br-overlay`) + kernel Geneve devices
+- **ovs/**: OVS bridge (`br-int`) + OVS Geneve tunnel ports
+
+Both mirror flanneld: detect host IP → derive subnet → create Geneve tunnel per peer.
 
 ```
 flanneld                    geneve-agent.py
