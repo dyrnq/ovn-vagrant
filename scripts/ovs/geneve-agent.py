@@ -498,7 +498,7 @@ def main():
             for event_type, key, value in etcd.watch_prefix(c["ETCD_PREFIX"]):
                 if stop_event.is_set():
                     break
-                name = key.replace(c["ETCD_PREFIX"], "")
+                name = key[len(c["ETCD_PREFIX"]):]
                 if name == hostname:
                     continue
                 if event_type == "put":

@@ -36,7 +36,7 @@ class BuildInterfaceXmlRequest(BaseModel):
     mac: str
 
 
-def check_key(x_api_key: str = Header(None)):
+def check_key(x_api_key: str | None = Header(None)):
     if x_api_key != API_KEY:
         raise HTTPException(403, "Invalid API key")
 
@@ -52,7 +52,7 @@ def nbctl(*args):
 
 
 @app.post("/api/bridge/")
-async def create_bridge(req: CreateBridgeRequest, x_api_key: str = Header(None)):
+async def create_bridge(req: CreateBridgeRequest, x_api_key: str | None = Header(None)):
     check_key(x_api_key)
     try:
         nbctl("ls-add", req.name)
@@ -72,7 +72,7 @@ async def create_bridge(req: CreateBridgeRequest, x_api_key: str = Header(None))
 
 
 @app.delete("/api/bridge/{name}")
-async def delete_bridge(name: str, x_api_key: str = Header(None)):
+async def delete_bridge(name: str, x_api_key: str | None = Header(None)):
     check_key(x_api_key)
     try:
         nbctl("ls-del", name)
@@ -82,7 +82,7 @@ async def delete_bridge(name: str, x_api_key: str = Header(None)):
 
 
 @app.post("/api/bridge/port/nic/xml")
-async def build_interface_xml(req: BuildInterfaceXmlRequest, x_api_key: str = Header(None)):
+async def build_interface_xml(req: BuildInterfaceXmlRequest, x_api_key: str | None = Header(None)):
     check_key(x_api_key)
     port_name = f"lsp-{uuid.uuid4().hex[:8]}"
     xml = f"""\

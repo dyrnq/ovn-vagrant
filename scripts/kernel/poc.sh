@@ -97,7 +97,6 @@ do_clean() {
     info "Cleaning..."
     ip netns del ns-test 2>/dev/null || true
     ip link del "veth-${HOSTNAME}" 2>/dev/null || true
-    docker ps -q --filter "name=" 2>/dev/null | xargs -r docker rm -f 2>/dev/null || true
     ip -d link show type veth 2>/dev/null | grep -oP '^\d+: \Kveth[^:]+' | while read v; do
         ip link del "$v" 2>/dev/null
     done

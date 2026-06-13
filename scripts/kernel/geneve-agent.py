@@ -205,8 +205,6 @@ def ensure_bridge(bridge_name, gw_cidr, saved_mac=""):
     """Create Linux bridge with gateway IP."""
     rc, _, _ = run(["ip", "link", "show", bridge_name], check=False)
     mac = saved_mac
-    rc, _, _ = run(["ip", "link", "show", bridge_name], check=False)
-    mac = saved_mac
     if rc != 0:
         mac = saved_mac if saved_mac else gen_mac()
         run(["ip", "link", "add", bridge_name, "address", mac, "type", "bridge"], check="die")
@@ -230,7 +228,6 @@ def ensure_bridge(bridge_name, gw_cidr, saved_mac=""):
     run(["sysctl", "-w", f"net.ipv4.conf.{bridge_name}.send_redirects=0"], check=False)
 
     log.info("bridge %s = %s", bridge_name, gw_cidr)
-    return mac
     return mac
 
 
@@ -449,7 +446,7 @@ def main():
             for event_type, key, value in etcd.watch_prefix(c["ETCD_PREFIX"]):
                 if stop_event.is_set():
                     break
-                name = key.replace(c["ETCD_PREFIX"], "")
+                name = key[len(c["ETCD_PREFIX"]):]
                 if name == hostname:
                     continue
                 if event_type == "put":

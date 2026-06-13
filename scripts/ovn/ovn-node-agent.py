@@ -252,19 +252,18 @@ def main():
         log.info("logical switch '%s' exists", c["LS_NAME"])
 
     # 2. Main loop
-    running = True
+    stop_event = threading.Event()
     def _stop(sig, frame):
-        nonlocal running
         log.info("caught signal %s — shutting down", sig)
-        running = False
+        stop_event.set()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
     log.info("agent running  (poll every %ds)", c["CHECK_INTERVAL"])
     prev_ports = {}
-    while running:
-        time.sleep(c["CHECK_INTERVAL"])
-        if not running:
+    while not stop_event.is_set():
+        stop_event.wait(c["CHECK_INTERVAL"])
+        if stop_event.is_set():
             break
 
         ovs_ports = get_ovs_ports_with_iface_id()
