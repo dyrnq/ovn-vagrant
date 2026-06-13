@@ -483,7 +483,7 @@ def main():
     # 8. Lease keepalive thread
     def keepalive_loop():
         while not stop_event.is_set():
-            time.sleep(c["LEASE_TTL"] // 2)
+            stop_event.wait(c["LEASE_TTL"] // 2)
             if not stop_event.is_set():
                 ok = etcd.keepalive()
                 if not ok:

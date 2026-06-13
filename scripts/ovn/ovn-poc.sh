@@ -17,9 +17,8 @@ set -euo pipefail
 
 CENTRAL_IP="192.168.200.11"
 LS="overlay"
-GW_DEV="gw-${HOSTNAME}"
-
 HOSTNAME=$(hostname -s)
+GW_DEV="gw-${HOSTNAME}"
 GREEN='\033[0;32m'; NC='\033[0m'
 info()  { echo -e "${GREEN}[${HOSTNAME}]${NC} $*"; }
 
