@@ -44,6 +44,7 @@ DEFAULTS = {
     "OVERLAY_PREFIX": "172.16",
     "OVERLAY_MASK":   "24",
     "LEASE_TTL":      30,
+    "CHECK_INTERVAL": 5,
 }
 
 log = logging.getLogger("geneve-agent")
@@ -290,7 +291,7 @@ def gen_mac():
     return ":".join(f"{x:02x}" for x in b)
 
 
-def ensure_gateway(c, hostname, gw_ip):
+def ensure_gateway(c, hostname, gw_ip, saved_mac=""):
     gw_dev = f"gw-{hostname}"
     gw_int = f"gw-int-{hostname}"
     gw_cidr = f"{gw_ip}/{c['PREFIX_LEN']}"
@@ -304,7 +305,7 @@ def ensure_gateway(c, hostname, gw_ip):
     run(["ip", "link", "del", gw_dev], check=False)  # cleanup, ok to fail
 
     # Generate unique MAC before creating veth (avoids FDB collision)
-    mac = gen_mac()
+    mac = saved_mac if saved_mac else gen_mac()
     run(["ip", "link", "add", gw_dev, "address", mac,
          "type", "veth", "peer", "name", gw_int], check="die")
 
@@ -424,26 +425,32 @@ def main():
             alloc = json.loads(alloc_data)
             host_id = alloc["host_id"]
             gw_ip = alloc["gw_ip"]
+            gw_mac = alloc.get("gw_mac", "")
             log.info("restored allocation: host_id=%d gw_ip=%s", host_id, gw_ip)
         except (json.JSONDecodeError, KeyError):
             host_id, gw_ip = _allocate_id(etcd, c, local_ip, alloc_key, hostname)
+            gw_mac = ""
     else:
         host_id, gw_ip = _allocate_id(etcd, c, local_ip, alloc_key, hostname)
+        gw_mac = ""
 
     log.info("host: %s (%s) → gateway: %s/%s",
              hostname, local_ip, gw_ip, c["PREFIX_LEN"])
 
     # 4. Ensure gateway
-    ensure_gateway(c, hostname, gw_ip)
+    ensure_gateway(c, hostname, gw_ip, gw_mac)
 
-    # 5. Register with lease (auto-expire on crash)
+    # 5. Clean stale geneve tunnels from previous run
+    _clean_stale_tunnels(c, etcd)
+
+    # 6. Register with lease (auto-expire on crash)
     lease_id = etcd.grant_lease(c["LEASE_TTL"])
     etcd_key = f"{c['ETCD_PREFIX']}{hostname}"
     etcd_value = json.dumps({"mgmt_ip": local_ip, "gw_ip": gw_ip})
     etcd.put(etcd_key, etcd_value, lease_id=lease_id)
     log.info("registered: %s", etcd_key)
 
-    # 6. Load existing peers + create tunnels
+    # 7. Load existing peers + create tunnels
     peer_cache = {}
     peers_raw = etcd.get_prefix(c["ETCD_PREFIX"])
     for name, val in peers_raw.items():
@@ -470,7 +477,7 @@ def main():
     def keepalive_loop():
         while not stop_event.is_set():
             time.sleep(c["LEASE_TTL"] // 2)
-            if running:
+            if not stop_event.is_set():
                 etcd.keepalive()
     t = threading.Thread(target=keepalive_loop, daemon=True)
     t.start()
@@ -493,8 +500,9 @@ def main():
                     except json.JSONDecodeError:
                         pass
                 elif event_type == "delete":
+                    cached = peer_cache.pop(name, {})
                     log.info("peer left: %s", name)
-                    remove_peer(name, info, c)
+                    remove_peer(name, cached, c)
         except Exception as e:
             if stop_event.is_set():
                 break

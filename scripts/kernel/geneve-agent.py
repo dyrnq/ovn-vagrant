@@ -46,6 +46,7 @@ DEFAULTS = {
     "OVERLAY_MASK":   "24",
     "BRIDGE_NAME":    "br-overlay",
     "LEASE_TTL":      30,
+    "CHECK_INTERVAL": 5,
 }
 
 log = logging.getLogger("geneve-agent")
@@ -200,13 +201,14 @@ class EtcdClient:
 
 # ── Linux bridge + Geneve management ────────────────────────
 
-def ensure_bridge(bridge_name, gw_cidr):
+def ensure_bridge(bridge_name, gw_cidr, saved_mac=""):
     """Create Linux bridge with gateway IP."""
     rc, _, _ = run(["ip", "link", "show", bridge_name], check=False)
     if rc != 0:
-        run(["ip", "link", "add", bridge_name, "type", "bridge"], check="die")
+        mac = saved_mac if saved_mac else gen_mac()
+        run(["ip", "link", "add", bridge_name, "address", mac, "type", "bridge"], check="die")
         run(["ip", "link", "set", bridge_name, "up"], check="die")
-        log.info("created bridge %s", bridge_name)
+        log.info("created bridge %s (MAC=%s)", bridge_name, mac)
 
     # Assign gateway IP if not present
     rc, out, _ = run(["ip", "-4", "-o", "addr", "show", "dev", bridge_name], check=False)
@@ -307,7 +309,7 @@ def _allocate_id(etcd, c, local_ip, alloc_key, hostname):
         "host_id": candidate_id, "gw_ip": candidate_gw, "mgmt_ip": local_ip, "gw_mac": "",
     }))
     log.info("created allocation: host_id=%d gw_ip=%s", candidate_id, candidate_gw)
-    return candidate_id, candidate_gw
+    return candidate_id, candidate_gw, ""
 
 
 # ── Stale tunnel cleanup ─────────────────────────────────────
@@ -368,17 +370,20 @@ def main():
             alloc = json.loads(alloc_data)
             host_id = alloc["host_id"]
             gw_ip = alloc["gw_ip"]
+            gw_mac = alloc.get("gw_mac", "")
             log.info("restored allocation: host_id=%d gw_ip=%s", host_id, gw_ip)
         except (json.JSONDecodeError, KeyError):
             host_id, gw_ip = _allocate_id(etcd, c, local_ip, alloc_key, hostname)
+            gw_mac = ""
     else:
         host_id, gw_ip = _allocate_id(etcd, c, local_ip, alloc_key, hostname)
+        gw_mac = ""
 
     gw_cidr = f"{gw_ip}/{c['PREFIX_LEN']}"
     log.info("host: %s (%s) → gateway: %s", hostname, local_ip, gw_cidr)
 
     # 4. Create bridge + gateway
-    ensure_bridge(c["BRIDGE_NAME"], gw_cidr)
+    ensure_bridge(c["BRIDGE_NAME"], gw_cidr, gw_mac)
 
     # 5. Register with lease
     lease_id = etcd.grant_lease(c["LEASE_TTL"])
@@ -439,8 +444,9 @@ def main():
                     except json.JSONDecodeError:
                         pass
                 elif event_type == "delete":
+                    cached = peer_cache.pop(name, {})
                     log.info("peer left: %s", name)
-                    remove_peer(name, info, c)
+                    remove_peer(name, cached, c)
         except Exception as e:
             if stop_event.is_set():
                 break
