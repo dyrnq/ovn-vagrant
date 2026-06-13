@@ -1,9 +1,10 @@
 # OVN Vagrant POC
 
-3-node cluster with cross-host Geneve tunnel verification. Two overlay approaches:
+3-node cluster with cross-host Geneve tunnel verification. Three overlay approaches:
 
-1. **OVN** — full-featured (ACL/DHCP/L3), uses ovn-controller + OpenFlow
-2. **Pure OVS** — minimal, uses OVS standalone + etcd watch + veth (like flannel)
+1. **Pure Linux kernel** — simplest, just `ip link` + bridge + Geneve (like flannel)
+2. **Pure OVS** — OVS standalone + etcd watch + veth
+3. **OVN** — full-featured (ACL/DHCP/L3), uses ovn-controller + OpenFlow
 
 ## Architecture
 
@@ -29,7 +30,7 @@
 │ 172.16.12.1   │  │ 172.16.13.1 │ │
 │               │  │             │ │
 │ workload      │  │ workload    │ │
-│ 172.16.12.x   │  │ 172.16.13.x│ │
+│ 172.16.12.x   │  │ 172.16.13.x │ │
 └───────────────┘  └─────────────┘ │
 ```
 
@@ -49,6 +50,29 @@ vagrant ssh ovn13 -- sudo bash /vagrant/scripts/ovs/geneve-host.sh host
 # 3. Verify
 vagrant ssh ovn11 -- sudo etcdctl get /geneve/ --prefix
 vagrant ssh ovn12 -- sudo journalctl -u geneve-agent -f
+```
+
+## Quick Start — Pure Linux Kernel (simplest)
+
+No OVS, no OVN. Just `ip link` + kernel Geneve + Linux bridge.
+
+```bash
+cd /data/work/ovn-vagrant
+vagrant up
+
+# 1. Central: install etcd
+vagrant ssh ovn11 -- sudo bash /vagrant/scripts/kernel/geneve-host.sh central
+
+# 2. Hosts: install agent (auto-creates bridge + Geneve tunnels)
+vagrant ssh ovn12 -- sudo bash /vagrant/scripts/kernel/geneve-host.sh host
+vagrant ssh ovn13 -- sudo bash /vagrant/scripts/kernel/geneve-host.sh host
+
+# 3. Workloads
+vagrant ssh ovn12 -- sudo bash /vagrant/scripts/kernel/poc.sh netns 172.16.12.100/16
+vagrant ssh ovn13 -- sudo bash /vagrant/scripts/kernel/poc.sh netns 172.16.13.100/16
+
+# 4. Test
+vagrant ssh ovn12 -- sudo bash /vagrant/scripts/kernel/poc.sh verify 172.16.13.100
 ```
 
 ## geneve-agent — Auto-discovery Daemon
@@ -255,6 +279,10 @@ vagrant destroy -f      # Destroy all VMs
 ├── insecure_private_key         # Vagrant default SSH key
 ├── scripts/
 │   ├── provision.sh             # System init (mirrors, sysctl, base tools)
+│   ├── kernel/                  # Pure Linux kernel approach
+│   │   ├── geneve-host.sh       #   Host setup (central/host/clean)
+│   │   ├── geneve-agent.py      #   Auto-discovery daemon
+│   │   └── poc.sh               #   POC (netns + docker)
 │   ├── ovs/                     # Pure OVS approach
 │   │   ├── geneve-host.sh       # Host setup (central/host/clean)
 │   │   ├── geneve-agent.py      # Auto-discovery daemon (etcd watch)
@@ -271,15 +299,12 @@ vagrant destroy -f      # Destroy all VMs
 
 ## vs flannel
 
-|                | flannel              | Pure OVS (`geneve-agent`)          | OVN                              |
-| -------------- | -------------------- | ---------------------------------- | -------------------------------- |
-| Central DB     | etcd                 | etcd                               | ovsdb-server × 2                 |
-| Per-host agent | flanneld             | geneve-agent                       | ovn-node-agent + ovn-controller  |
-| Overlay        | VXLAN (UDP 8472)     | Geneve (UDP 6081)                  | Geneve (UDP 6081)                |
-| Bridge         | cni0                 | gw-$HOSTNAME (OVS veth)            | gw-$HOSTNAME (veth)              |
-| Tunnel         | flannel.1 (kernel)   | geneve-$PEER (OVS port)            | OVN-managed                      |
-| Port register  | CNI plugin           | etcd watch + OVS                   | ovn-node-agent auto-lsp          |
-| Subnet alloc   | etcd auto-lease      | etcd persistent allocation         | script-derived                   |
-| Route mgmt     | flanneld             | geneve-agent (/24 per peer)        | ovn-node-agent                   |
-| Complexity     | Low                  | Low                                | High (OpenFlow 254 tables)       |
-| L3/ACL/DHCP    | None                 | None                               | Built-in                         |
+|                | flannel              | Pure Kernel           | Pure OVS              | OVN                              |
+| -------------- | -------------------- | --------------------- | --------------------- | -------------------------------- |
+| Central DB     | etcd                 | etcd                  | etcd                  | ovsdb-server × 2                 |
+| Per-host agent | flanneld             | geneve-agent          | geneve-agent          | ovn-node-agent + ovn-controller  |
+| Overlay        | VXLAN (UDP 8472)     | Geneve (kernel)       | Geneve (OVS port)     | Geneve (OVN-managed)             |
+| Bridge         | cni0                 | br-overlay (Linux)    | gw-$HOSTNAME (OVS)    | gw-$HOSTNAME (veth)              |
+| Dependencies   | flannel              | geneve.ko (built-in)  | openvswitch           | ovn-central + ovn-host           |
+| Complexity     | Low                  | Lowest                | Low                   | High (OpenFlow 254 tables)       |
+| L3/ACL/DHCP    | None                 | None                  | None                  | Built-in                         |
