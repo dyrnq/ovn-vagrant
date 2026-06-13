@@ -79,22 +79,25 @@ vagrant ssh ovn12 -- sudo bash /vagrant/scripts/kernel/poc.sh verify 172.16.13.1
 
 Both `ovs/geneve-agent.py` and `kernel/geneve-agent.py` share the same etcd-based
 discovery logic. The difference is the forwarding plane:
-- **kernel/**: Linux bridge (`br-overlay`) + kernel Geneve devices
-- **ovs/**: OVS bridge (`br-int`) + OVS Geneve tunnel ports
+
+```
+Component         kernel/                    ovs/
+───────────────   ───────────────────────    ──────────────────────
+Bridge            br-overlay (Linux bridge)  br-$HOSTNAME (OVS veth)
+Tunnel            geneve-$PEER (kernel)      geneve-$PEER (OVS port)
+Gateway IP        172.16.N.1 on br-overlay   172.16.N.1 on gw-$HOSTNAME
+Dependencies      geneve.ko (built-in)       openvswitch
+```
 
 Both mirror flanneld: detect host IP → derive subnet → create Geneve tunnel per peer.
 
-```
-flanneld                    geneve-agent.py
-─────────────               ─────────────────
-etcd                        etcd (v3 REST API)
-  /coreos.com/network/        /geneve/allocations/ (persistent, no lease)
-                              /geneve/peers/ (TTL lease, auto-expire)
-cni0 (Linux bridge)         gw-$HOSTNAME (OVS veth, .1 gateway)
-flannel.1 (VXLAN)           geneve-$PEER (OVS Geneve tunnel port)
-ip route                    ip route (/24 per peer)
-watch etcd                  watch etcd (real-time HTTP stream)
-```
+### Gateway role
+
+Workloads use `/16` addresses — all `172.16.x.x` is on-link, ARP goes directly
+through bridge/tunnel to remote host. The `.1` gateway is **not** in the data path
+for workload ↔ workload traffic. It only serves:
+- Host → remote workload (host routing)
+- Workload → outside overlay (future NAT/routing)
 
 ### Two etcd key spaces
 
@@ -108,9 +111,9 @@ watch etcd                  watch etcd (real-time HTTP stream)
 1. Detect host IP → derive overlay subnet (192.168.200.N → 172.16.N.1/24)
 2. Connect to etcd
 3. Check `/geneve/allocations/<hostname>` → restore or create identity
-4. Create gateway veth (`gw-$HOSTNAME`) with unique MAC + overlay route
+4. Create bridge/gateway with `172.16.N.1/24` + unique MAC
 5. Grant lease + register to `/geneve/peers/<hostname>`
-6. Load existing peers → create OVS Geneve tunnel ports + /24 routes
+6. Load existing peers → create Geneve tunnel per peer
 7. Watch `/geneve/peers/` for changes → real-time tunnel/route sync
 8. Lease keepalive thread (TTL/2 interval)
 
@@ -309,7 +312,7 @@ vagrant destroy -f      # Destroy all VMs
 | Central DB     | etcd                 | etcd                  | etcd                  | ovsdb-server × 2                 |
 | Per-host agent | flanneld             | geneve-agent          | geneve-agent          | ovn-node-agent + ovn-controller  |
 | Overlay        | VXLAN (UDP 8472)     | Geneve (kernel)       | Geneve (OVS port)     | Geneve (OVN-managed)             |
-| Bridge         | cni0                 | br-overlay (Linux)    | gw-$HOSTNAME (OVS)    | gw-$HOSTNAME (veth)              |
+| Bridge         | cni0                 | br-overlay (Linux)    | gw-$HOSTNAME (veth)   | gw-$HOSTNAME (veth)              |
 | Dependencies   | flannel              | geneve.ko (built-in)  | openvswitch           | ovn-central + ovn-host           |
 | Complexity     | Low                  | Lowest                | Low                   | High (OpenFlow 254 tables)       |
 | L3/ACL/DHCP    | None                 | None                  | None                  | Built-in                         |
