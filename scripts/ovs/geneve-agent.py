@@ -269,13 +269,14 @@ def add_peer(name, info, c, hostname):
         log.info("route %s via %s → %s (%s)", subnet, gw_dev, port_name, name)
 
 
-def remove_peer(name, c):
+def remove_peer(name, info, c):
     """Remove OVS tunnel + host route for a peer."""
     port_name = geneve_port_name(name)
     remove_geneve_tunnel(port_name)
-    m = re.search(r'(\d+)$', name)
-    if m:
-        subnet = f"{c['OVERLAY_PREFIX']}.{m.group(1)}.0/{c['PREFIX_LEN']}"
+    gw_ip = info.get("gw_ip", "")
+    if gw_ip:
+        peer_id = gw_ip.rsplit(".", 1)[0].split(".")[-1]
+        subnet = f"{c['OVERLAY_PREFIX']}.{peer_id}.0/{c['PREFIX_LEN']}"
         run(["ip", "route", "del", subnet], check=False)
 
 
@@ -315,6 +316,7 @@ def ensure_gateway(c, hostname, gw_ip):
     # Assign gateway IP
     run(["ip", "addr", "flush", "dev", gw_dev], check=False)  # cleanup
     run(["ip", "addr", "add", gw_cidr, "dev", gw_dev], check="die")
+    run(["ip", "link", "set", gw_dev, "mtu", "1450"], check=False)  # Geneve overhead
     run(["ip", "link", "set", gw_dev, "up"], check="die")
 
     # Disable ICMP redirect (gateway must forward, not redirect)
@@ -357,10 +359,31 @@ def _allocate_id(etcd, c, local_ip, alloc_key, hostname):
         sys.exit(1)
 
     etcd.put(alloc_key, json.dumps({
-        "host_id": candidate_id, "gw_ip": candidate_gw, "mgmt_ip": local_ip,
+        "host_id": candidate_id, "gw_ip": candidate_gw, "mgmt_ip": local_ip, "gw_mac": "",
     }))
     log.info("created allocation: host_id=%d gw_ip=%s", candidate_id, candidate_gw)
     return candidate_id, candidate_gw
+
+
+# ── Stale tunnel cleanup ─────────────────────────────────────
+
+def _clean_stale_tunnels(c, etcd):
+    """Remove OVS geneve ports that no longer have a peer in etcd."""
+    current_peers = set(etcd.get_prefix(c["ETCD_PREFIX"]).keys())
+    rc, out, _ = run(["ovs-vsctl", "--format=json", "--columns=name", "list", "Interface"], check=False)
+    if rc != 0:
+        return
+    try:
+        rows = json.loads(out).get("data", [])
+    except (json.JSONDecodeError, AttributeError):
+        return
+    for row in rows:
+        port_name = row[0]
+        if port_name.startswith("geneve-"):
+            peer_name = port_name[len("geneve-"):]
+            if peer_name not in current_peers:
+                log.info("cleaning stale OVS tunnel %s (peer gone)", port_name)
+                remove_geneve_tunnel(port_name)
 
 
 # ── Main ────────────────────────────────────────────────────
@@ -421,16 +444,18 @@ def main():
     log.info("registered: %s", etcd_key)
 
     # 6. Load existing peers + create tunnels
+    peer_cache = {}
     peers_raw = etcd.get_prefix(c["ETCD_PREFIX"])
     for name, val in peers_raw.items():
         if name == hostname:
             continue
         try:
             info = json.loads(val)
+            peer_cache[name] = info
             add_peer(name, info, c, hostname)
         except json.JSONDecodeError:
             continue
-    log.info("loaded %d peer(s)", len(peers_raw) - 1)
+    log.info("loaded %d peer(s)", len(peer_cache))
 
     # 7. Graceful shutdown
     running = True
@@ -443,7 +468,7 @@ def main():
 
     # 8. Lease keepalive thread
     def keepalive_loop():
-        while running:
+        while not stop_event.is_set():
             time.sleep(c["LEASE_TTL"] // 2)
             if running:
                 etcd.keepalive()
@@ -452,10 +477,10 @@ def main():
 
     # 9. Watch for peer changes (auto-reconnect on disconnect)
     log.info("watching etcd %s ...", c["ETCD_PREFIX"])
-    while running:
+    while not stop_event.is_set():
         try:
             for event_type, key, value in etcd.watch_prefix(c["ETCD_PREFIX"]):
-                if not running:
+                if stop_event.is_set():
                     break
                 name = key.replace(c["ETCD_PREFIX"], "")
                 if name == hostname:
@@ -469,9 +494,9 @@ def main():
                         pass
                 elif event_type == "delete":
                     log.info("peer left: %s", name)
-                    remove_peer(name, c)
+                    remove_peer(name, info, c)
         except Exception as e:
-            if not running:
+            if stop_event.is_set():
                 break
             log.warning("watch disconnected: %s — reconnecting in %ds", e, c["CHECK_INTERVAL"])
             time.sleep(c["CHECK_INTERVAL"])
