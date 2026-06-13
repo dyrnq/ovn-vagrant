@@ -121,10 +121,16 @@ class EtcdClient:
         return self.lease_id
 
     def keepalive(self):
-        """Refresh the lease."""
-        if self.lease_id:
-            self.client.post("/v3/lease/keepalive",
-                             json={"ID": self.lease_id})
+        """Refresh lease. Returns True on success, False if etcd unreachable."""
+        if not self.lease_id:
+            return False
+        try:
+            r = self.client.post("/v3/lease/keepalive", json={"ID": self.lease_id})
+            r.raise_for_status()
+            return True
+        except Exception as e:
+            log.warning("lease keepalive failed: %s", e)
+            return False
 
     def put(self, key, value, lease_id=None):
         """Put a key-value pair."""
@@ -313,6 +319,40 @@ def ensure_gateway(c, hostname, gw_ip):
     return True
 
 
+
+# ── Allocation with conflict detection ──────────────────────
+
+def _allocate_id(etcd, c, local_ip, alloc_key, hostname):
+    """Allocate host_id with conflict detection."""
+    candidate_id = int(local_ip.rsplit(".", 1)[1])
+    candidate_gw = f"{c['OVERLAY_PREFIX']}.{candidate_id}.1"
+
+    existing = etcd.get_prefix(c["ALLOC_PREFIX"])
+    used_ids = {}
+    for name, val in existing.items():
+        if name == hostname:
+            continue
+        try:
+            alloc = json.loads(val)
+            used_ids[alloc["host_id"]] = name
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    if candidate_id in used_ids:
+        log.error("host_id %d already allocated to '%s' — "
+                  "cannot use IP %s as overlay host", candidate_id,
+                  used_ids[candidate_id], local_ip)
+        log.error("fix: change management IP or manually delete "
+                  "/geneve/allocations/%s in etcd", used_ids[candidate_id])
+        sys.exit(1)
+
+    etcd.put(alloc_key, json.dumps({
+        "host_id": candidate_id, "gw_ip": candidate_gw, "mgmt_ip": local_ip,
+    }))
+    log.info("created allocation: host_id=%d gw_ip=%s", candidate_id, candidate_gw)
+    return candidate_id, candidate_gw
+
+
 # ── Main ────────────────────────────────────────────────────
 
 def main():
@@ -343,7 +383,7 @@ def main():
     # 2. Connect to etcd
     etcd = EtcdClient(c["ETCD_URL"])
 
-    # 3. Check persistent allocation (survives reboot/lease expiry)
+    # 3. Check persistent allocation (with conflict detection)
     alloc_key = f"{c['ALLOC_PREFIX']}{hostname}"
     alloc_data = etcd.get(alloc_key)
     if alloc_data:
@@ -353,19 +393,9 @@ def main():
             gw_ip = alloc["gw_ip"]
             log.info("restored allocation: host_id=%d gw_ip=%s", host_id, gw_ip)
         except (json.JSONDecodeError, KeyError):
-            log.warning("invalid allocation data, re-creating")
-            host_id = int(local_ip.rsplit(".", 1)[1])
-            gw_ip = f"{c['OVERLAY_PREFIX']}.{host_id}.1"
-            etcd.put(alloc_key, json.dumps({
-                "host_id": host_id, "gw_ip": gw_ip, "mgmt_ip": local_ip,
-            }))
+            host_id, gw_ip = _allocate_id(etcd, c, local_ip, alloc_key, hostname)
     else:
-        host_id = int(local_ip.rsplit(".", 1)[1])
-        gw_ip = f"{c['OVERLAY_PREFIX']}.{host_id}.1"
-        etcd.put(alloc_key, json.dumps({
-            "host_id": host_id, "gw_ip": gw_ip, "mgmt_ip": local_ip,
-        }))
-        log.info("created allocation: host_id=%d gw_ip=%s", host_id, gw_ip)
+        host_id, gw_ip = _allocate_id(etcd, c, local_ip, alloc_key, hostname)
 
     log.info("host: %s (%s) → gateway: %s/%s",
              hostname, local_ip, gw_ip, c["PREFIX_LEN"])
@@ -410,33 +440,41 @@ def main():
     t = threading.Thread(target=keepalive_loop, daemon=True)
     t.start()
 
-    # 9. Watch for peer changes (blocks)
+    # 9. Watch for peer changes (auto-reconnect on disconnect)
     log.info("watching etcd %s ...", c["ETCD_PREFIX"])
-    try:
-        for event_type, key, value in etcd.watch_prefix(c["ETCD_PREFIX"]):
+    while running:
+        try:
+            for event_type, key, value in etcd.watch_prefix(c["ETCD_PREFIX"]):
+                if not running:
+                    break
+                name = key.replace(c["ETCD_PREFIX"], "")
+                if name == hostname:
+                    continue
+                if event_type == "put":
+                    try:
+                        info = json.loads(value)
+                        log.info("peer joined: %s (%s)", name, info["mgmt_ip"])
+                        add_peer(name, info, c, hostname)
+                    except json.JSONDecodeError:
+                        pass
+                elif event_type == "delete":
+                    log.info("peer left: %s", name)
+                    remove_peer(name, c)
+        except Exception as e:
             if not running:
                 break
-            name = key.replace(c["ETCD_PREFIX"], "")
-            if name == hostname:
-                continue
+            log.warning("watch disconnected: %s — reconnecting in %ds", e, c["CHECK_INTERVAL"])
+            time.sleep(c["CHECK_INTERVAL"])
+            try:
+                lease_id = etcd.grant_lease(c["LEASE_TTL"])
+                etcd.put(etcd_key, json.dumps({"mgmt_ip": local_ip, "gw_ip": gw_ip}), lease_id=lease_id)
+                log.info("re-registered: %s", etcd_key)
+            except Exception as e2:
+                log.error("re-register failed: %s", e2)
 
-            if event_type == "put":
-                try:
-                    info = json.loads(value)
-                    log.info("peer joined: %s (%s)", name, info["mgmt_ip"])
-                    add_peer(name, info, c, hostname)
-                except json.JSONDecodeError:
-                    pass
-            elif event_type == "delete":
-                log.info("peer left: %s", name)
-                remove_peer(name, c)
-    except Exception as e:
-        if running:
-            log.error("watch error: %s", e)
-    finally:
-        etcd.delete(etcd_key)
-        etcd.close()
-        log.info("stopped")
+    etcd.delete(etcd_key)
+    etcd.close()
+    log.info("stopped")
 
 
 if __name__ == "__main__":
