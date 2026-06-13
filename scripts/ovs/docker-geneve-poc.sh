@@ -56,7 +56,7 @@ deploy() {
 
     # 5. eth0 → container
     local pid
-    pid=$(docker inspect -f '{{.State.Pid}}' "$cn")
+    pid=$(docker inspect -f '{{.State.Pid}}' "$CN")
     ip link set eth0 netns "$pid"
     nsenter -t "$pid" -n ip addr add "${container_ip}/16" dev eth0
     nsenter -t "$pid" -n ip link set eth0 up

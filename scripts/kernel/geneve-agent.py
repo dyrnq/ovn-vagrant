@@ -309,7 +309,7 @@ def _allocate_id(etcd, c, local_ip, alloc_key, hostname):
         "host_id": candidate_id, "gw_ip": candidate_gw, "mgmt_ip": local_ip, "gw_mac": "",
     }))
     log.info("created allocation: host_id=%d gw_ip=%s", candidate_id, candidate_gw)
-    return candidate_id, candidate_gw, ""
+    return candidate_id, candidate_gw
 
 
 # ── Stale tunnel cleanup ─────────────────────────────────────

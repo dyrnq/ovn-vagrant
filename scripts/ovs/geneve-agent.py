@@ -465,11 +465,10 @@ def main():
     log.info("loaded %d peer(s)", len(peer_cache))
 
     # 7. Graceful shutdown
-    running = True
+    stop_event = threading.Event()
     def _stop(sig, frame):
-        nonlocal running
         log.info("shutting down...")
-        running = False
+        stop_event.set()
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
